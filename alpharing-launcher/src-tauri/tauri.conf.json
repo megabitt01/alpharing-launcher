@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "alpharing-launcher",
+  "productName": "AlphaRing Launcher",
   "version": "0.1.0",
   "identifier": "com.jackb.alpharing-launcher",
   "build": {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import alphaRingLogo from "./assets/logo_alpharing.png";
 import johnHalo from "./assets/john_halo.png";
 import background from "./assets/halo_ce.png";
@@ -7,6 +8,10 @@ import "./App.css";
 const MENU_BUTTONS = [
   { label: "Play MCC with Anti-Cheat", action: () => console.log("Button 1") },
   { label: "Play Splitscreen Halo", action: () => console.log("Button 2") },
+  {
+    label: "Quit to Desktop",
+    action: () => getCurrentWindow().close(),
+  },
 ];
 
 const GAMEPAD_AXIS_DEADZONE = 0.5;
