@@ -1,7 +1,15 @@
+@font-face {
+  font-family: "TVNord";
+  src: url("assets/tvnord.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
+
 body {
   margin: 0px;  
   height: 100vh;
   overflow: hidden;
+  font-family: "TVNord";
 }
 
 #root {
@@ -15,6 +23,7 @@ main {
 
 .logo {
   position: absolute;
+  top: 10%;
   width: 100%;
   z-index: 100;
 }
@@ -30,7 +39,14 @@ main {
   position: relative;
   height: 100%;
   width: 100%;
-  background-size: cover;
+}
+
+.background-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .menu {
@@ -46,8 +62,9 @@ main {
 
 .menu-button {
   padding: 12px 28px;
+  font-family: "TVNord";
   font-size: 18px;
-  color: white;
+  color: #86e1ff;
   background: rgba(0, 0, 0, 0.5);
   border: 2px solid rgba(255, 255, 255, 0.4);
   border-radius: 4px;
@@ -66,6 +83,25 @@ main {
   transform: scale(1.05);
 }
 
+.log-panel {
+  position: absolute;
+  z-index: 200;
+  top: 20%;
+  left: 30%;
+  width: 40%;
+}
+
+.log-message {
+  margin: 0;
+  padding: 12px 28px;
+  font-size: 18px;
+  color: white;
+  background: rgba(0, 0, 0, 0.5);
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  text-align: center;
+}
+
 .info {
   bottom: 0;
   right: 0;
@@ -75,4 +111,10 @@ main {
   text-align: center;
   user-select: none;
   color: white;
+}
+
+@media screen and (min-width: 1000px) {
+  .menu-button {
+    font-size: 32px;
+  }
 }
