@@ -1,10 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use steamworks::PublishedFileId;
+use tauri::{AppHandle, Emitter, Manager};
 
 const GAME_SUBPATH: &str = "steamapps/common/Halo The Master Chief Collection";
 const MOD_DLL_SUBPATH: &str = "MCC/Binaries/Win64";
@@ -12,6 +15,11 @@ const MOD_DLL_NAME: &str = "WTSAPI32.dll";
 const EXTRA_MOD_FILES: &[&str] = &["alpha_ring_menu.bin", "alpha_ring_menu.cfg"];
 const RELEASES_API_URL: &str = "https://api.github.com/repos/megabitt01/AlphaRing/releases/latest";
 const ANTICHEAT_FLAG: &str = "-eac";
+const WORKSHOP_APP_ID: u32 = 976730;
+const WORKSHOP_ITEM_IDS: &[u64] = &[3686670451, 3730810482];
+const WORKSHOP_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKSHOP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+const WORKSHOP_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct AppPaths {
     game_path: PathBuf,
@@ -116,6 +124,147 @@ fn find_game_path() -> Option<PathBuf> {
     None
 }
 
+// Workshop content for an app is downloaded into the same library folder the
+// app itself lives in, e.g. `<library>/steamapps/workshop/content/<app id>`.
+fn workshop_item_path(steamapps_dir: &Path, item_id: u64) -> PathBuf {
+    steamapps_dir
+        .join("workshop/content")
+        .join(WORKSHOP_APP_ID.to_string())
+        .join(item_id.to_string())
+}
+
+// Any failure here means the mod's required Workshop content isn't on disk,
+// so we close the app instead of letting it continue into a broken launch.
+fn ensure_workshop_items(app: &AppHandle, steamapps_dir: &Path) -> Result<(), String> {
+    let missing: Vec<u64> = WORKSHOP_ITEM_IDS
+        .iter()
+        .copied()
+        .filter(|id| !workshop_item_path(steamapps_dir, *id).exists())
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    emit_log(app, "Subscribing to required Workshop items...");
+
+    let client = steamworks::Client::init_app(WORKSHOP_APP_ID)
+        .map_err(|err| format!("Couldn't connect to Steam to fetch Workshop items: {err}"))?;
+
+    let ugc = client.ugc();
+    let pending = Arc::new(AtomicUsize::new(missing.len()));
+    let subscribe_failed = Arc::new(AtomicUsize::new(0));
+
+    for item_id in &missing {
+        let item_id = *item_id;
+        let pending = pending.clone();
+        let subscribe_failed = subscribe_failed.clone();
+        let app = app.clone();
+
+        ugc.subscribe_item(PublishedFileId(item_id), move |result| {
+            match result {
+                Ok(()) => emit_log(&app, format!("Subscribed to Workshop item {item_id}")),
+                Err(err) => {
+                    emit_log(
+                        &app,
+                        format!("Failed to subscribe to Workshop item {item_id}: {err}"),
+                    );
+                    subscribe_failed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            pending.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
+
+    let start = Instant::now();
+    while pending.load(Ordering::SeqCst) > 0 && start.elapsed() < WORKSHOP_SUBSCRIBE_TIMEOUT {
+        client.run_callbacks();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if pending.load(Ordering::SeqCst) > 0 {
+        return Err("Timed out subscribing to Workshop items".to_string());
+    }
+    if subscribe_failed.load(Ordering::SeqCst) > 0 {
+        return Err("Failed to subscribe to one or more Workshop items".to_string());
+    }
+
+    for item_id in &missing {
+        ugc.download_item(PublishedFileId(*item_id), true);
+    }
+
+    // The actual file transfer only happens while this process's Steam
+    // session is alive, so we have to keep pumping callbacks and stay
+    // connected until every item reports installed (or we time out) instead
+    // of letting `client`/`ugc` drop and shut the session down early.
+    emit_log(app, "Downloading Workshop items...");
+
+    let mut remaining: Vec<u64> = missing.clone();
+    let download_start = Instant::now();
+    let mut last_log = Instant::now() - Duration::from_secs(3);
+    let mut last_progress = Instant::now();
+    let mut last_bytes: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+
+    while !remaining.is_empty() && download_start.elapsed() < WORKSHOP_DOWNLOAD_TIMEOUT {
+        client.run_callbacks();
+
+        remaining.retain(|item_id| {
+            let state = ugc.item_state(PublishedFileId(*item_id));
+            let installed = state.contains(steamworks::ItemState::INSTALLED)
+                && !state.contains(steamworks::ItemState::DOWNLOADING)
+                && !state.contains(steamworks::ItemState::DOWNLOAD_PENDING);
+
+            if installed {
+                emit_log(app, format!("Workshop item {item_id} installed"));
+            }
+
+            !installed
+        });
+
+        // Track whether any item's downloaded byte count has moved; if
+        // nothing has progressed for a while, the download has stalled and
+        // we shouldn't keep waiting out the full timeout.
+        let mut any_progress = false;
+        for item_id in &remaining {
+            if let Some((current, _total)) = ugc.item_download_info(PublishedFileId(*item_id)) {
+                if last_bytes.insert(*item_id, current) != Some(current) {
+                    any_progress = true;
+                }
+            }
+        }
+        if any_progress {
+            last_progress = Instant::now();
+        }
+
+        if !remaining.is_empty() && last_progress.elapsed() >= WORKSHOP_STALL_TIMEOUT {
+            return Err("Workshop item download stalled".to_string());
+        }
+
+        if !remaining.is_empty() && last_log.elapsed() >= Duration::from_secs(3) {
+            for item_id in &remaining {
+                if let Some((current, total)) = ugc.item_download_info(PublishedFileId(*item_id))
+                {
+                    emit_log(
+                        app,
+                        format!("Downloading Workshop item {item_id}: {current}/{total} bytes"),
+                    );
+                }
+            }
+            last_log = Instant::now();
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    if !remaining.is_empty() {
+        return Err(format!(
+            "Workshop items did not finish downloading before timing out: {remaining:?}"
+        ));
+    }
+
+    Ok(())
+}
+
 fn check_os(app: &AppHandle) -> Result<(), String> {
     if cfg!(target_os = "windows") {
         emit_log(app, "Running Windows version");
@@ -130,6 +279,15 @@ fn check_os(app: &AppHandle) -> Result<(), String> {
     })?;
 
     emit_log(app, format!("Found game installation at {}", game_path.display()));
+
+    if let Some(steamapps_dir) = game_path.parent().and_then(Path::parent) {
+        if let Err(err) = ensure_workshop_items(app, steamapps_dir) {
+            emit_log(app, format!("Closing: {err}"));
+            app.exit(1);
+            return Err(err);
+        }
+    }
+
     set_app_paths(game_path);
     Ok(())
 }
@@ -318,6 +476,16 @@ async fn play(app: AppHandle, vanilla_mode: bool) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let fullscreen = std::env::args().any(|arg| arg == "-fullscreen");
+
+            if fullscreen {
+                let window = app.get_webview_window("main").unwrap();
+                window.set_fullscreen(true)?;
+            }
+
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![play, latest_mod_version])
         .run(tauri::generate_context!())
