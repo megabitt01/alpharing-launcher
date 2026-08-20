@@ -30,6 +30,11 @@
       "icons/launcherIcon.png",
       "icons/launcherIcon.icns",
       "icons/launcherIcon.ico"
-    ]
+    ],
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   }
 }

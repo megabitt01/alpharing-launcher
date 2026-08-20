@@ -9,4 +9,4 @@ This template should help get you started developing with Tauri and React in Vit
 ## Building
 
 When building on Linux, use this command:
-NO_STRIP=true LD_LIBRARY_PATH="$PWD/src-tauri/libs:$LD_LIBRARY_PATH" npm run tauri build
+NO_STRIP=true GSTREAMER_HELPERS_DIR=/usr/lib/gstreamer-1.0 LD_LIBRARY_PATH="$PWD/src-tauri/libs:$LD_LIBRARY_PATH" npm run tauri build
