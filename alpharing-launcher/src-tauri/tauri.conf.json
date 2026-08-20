@@ -23,9 +23,6 @@
   },
   "bundle": {
     "active": true,
-    "resources": [
-      "libs/libsteam_api.so"
-    ],
     "targets": "all",
     "icon": [
       "icons/launcherIconSmall.png",
