@@ -89,7 +89,6 @@ function App({buildInfo = "", modInfo: initialModInfo = ""}) {
     }
 
     setSelectedIndex(index);
-    playSound(clickSound);
 
     const button = buttonRefs.current[index];
     const container = backgroundRef.current;
