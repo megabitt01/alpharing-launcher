@@ -14,12 +14,35 @@ const MOD_DLL_SUBPATH: &str = "MCC/Binaries/Win64";
 const MOD_DLL_NAME: &str = "WTSAPI32.dll";
 const EXTRA_MOD_FILES: &[&str] = &["alpha_ring_menu.bin", "alpha_ring_menu.cfg"];
 const RELEASES_API_URL: &str = "https://api.github.com/repos/megabitt01/AlphaRing/releases/latest";
-const ANTICHEAT_FLAG: &str = "-eac";
 const WORKSHOP_APP_ID: u32 = 976730;
 const WORKSHOP_ITEM_IDS: &[u64] = &[3686670451, 3730810482];
 const WORKSHOP_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSHOP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const WORKSHOP_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+// steam_api64.dll is embedded in the exe and delay-loaded (see build.rs) so
+// a single portable exe works without an MSI placing the DLL alongside it.
+// Windows only resolves the delay-loaded import on the first real
+// Steamworks call, so we have until `ensure_workshop_items` runs to have
+// written our embedded copy out next to the exe.
+#[cfg(target_os = "windows")]
+static STEAM_API_DLL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/steam_api64.dll"));
+
+#[cfg(target_os = "windows")]
+fn ensure_steam_api_dll_extracted() {
+    let dest = match std::env::current_exe() {
+        Ok(exe) => exe.with_file_name("steam_api64.dll"),
+        Err(_) => return,
+    };
+
+    let up_to_date = fs::read(&dest)
+        .map(|existing| existing == STEAM_API_DLL_BYTES)
+        .unwrap_or(false);
+
+    if !up_to_date {
+        let _ = fs::write(&dest, STEAM_API_DLL_BYTES);
+    }
+}
 
 struct AppPaths {
     game_path: PathBuf,
@@ -429,17 +452,41 @@ async fn check_mod(app: &AppHandle, vanilla_mode: bool) -> Result<(), String> {
     launch(app, vanilla_mode)
 }
 
+// `steam` is only resolvable via PATH on Linux; on Windows the Steam
+// installer doesn't add itself to PATH, so `Command::new("steam")` fails
+// with a "program not found" error. Resolve the real steam.exe path using
+// the same install-directory scan `find_game_path` relies on.
+#[cfg(target_os = "windows")]
+fn steam_command() -> Result<Command, String> {
+    steam_root_candidates()
+        .into_iter()
+        .map(|root| root.join("steam.exe"))
+        .find(|exe| exe.is_file())
+        .map(Command::new)
+        .ok_or_else(|| "Couldn't find Steam (steam.exe); is Steam installed?".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn steam_command() -> Result<Command, String> {
+    Ok(Command::new("steam"))
+}
+
 fn launch(app: &AppHandle, vanilla_mode: bool) -> Result<(), String> {
     emit_log(app, "Launching MCC...");
 
-    let mut command = Command::new("steam");
-    command.args(["-applaunch", "976730"]);
+    let mut command = steam_command()?;
 
-    if !vanilla_mode {
-        if cfg!(target_os = "linux") {
-            command.env("WINEDLLOVERRIDES", "WTSAPI32=n,b");
+    if !vanilla_mode && cfg!(target_os = "windows") {
+        command.arg("steam://launch/976730/option2");
+    } else {
+        command.args(["-applaunch", "976730"]);
+
+        if !vanilla_mode {
+            if cfg!(target_os = "linux") {
+                command.env("WINEDLLOVERRIDES", "WTSAPI32=n,b");
+            }
+            command.arg("-eac");
         }
-        command.arg(ANTICHEAT_FLAG);
     }
 
     command.spawn().map_err(|e| e.to_string())?;
@@ -475,6 +522,9 @@ async fn play(app: AppHandle, vanilla_mode: bool) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    ensure_steam_api_dll_extracted();
+
     tauri::Builder::default()
         .setup(|app| {
             let fullscreen = std::env::args().any(|arg| arg == "-fullscreen");
