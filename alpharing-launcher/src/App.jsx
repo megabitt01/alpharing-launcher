@@ -4,23 +4,22 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import alphaRingLogo from "./assets/logo_alpharing.png";
 import johnHalo from "./assets/john_halo.png";
-import bkgVideo from "./assets/bkgVideo.mp4";
-import selectSound from "./assets/select.wav";
-import clickSound from "./assets/click.wav";
+// import bkgVideo from "./assets/bkgVideo.mp4";
+import bkgImage from "./assets/bkgImage.png";
+// import selectSound from "./assets/select.wav";
+// import clickSound from "./assets/click.wav";
 import "./App.css";
 
 const CLOSE_DELAY_MS = 1000;
 const ERROR_DISPLAY_MS = 2000;
 
 const playSound = (src) => {
-  new Audio(src).play().catch(() => {});
+  // new Audio(src).play().catch(() => {});
 };
 
-const selectAudio = new Audio(selectSound);
-
 const playSelectSound = () => {
-  selectAudio.currentTime = 0;
-  selectAudio.play().catch(() => {});
+  // selectAudio.currentTime = 0;
+  // selectAudio.play().catch(() => {});
 };
 
 const closeWindowDelayed = () => {
@@ -202,7 +201,8 @@ function App({buildInfo = "", modInfo: initialModInfo = ""}) {
   return (
     <main className="container">
       <div className="background" ref={backgroundRef}>
-        <video className="background-video" src={bkgVideo} autoPlay loop muted playsInline/>
+        {/* <video className="background-video" src={bkgVideo} autoPlay loop muted playsInline/> */}
+        <img className="background-video" src={bkgImage}/>
         <img className="logo" src={alphaRingLogo}/>
         {showLog ? (
           <div className="log-panel" style={logPosition ?? undefined}>
