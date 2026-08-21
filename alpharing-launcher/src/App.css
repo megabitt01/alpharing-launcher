@@ -117,4 +117,8 @@ main {
   .menu-button {
     font-size: 32px;
   }
+
+  .log-message {
+    font-size: 32px;
+  }
 }
