@@ -10,6 +10,8 @@ use steamworks::PublishedFileId;
 use tauri::{AppHandle, Emitter, Manager};
 
 const GAME_SUBPATH: &str = "steamapps/common/Halo The Master Chief Collection";
+const CFG_FILE_NAME: &str = "launcher.cfg";
+const CFG_PATH_KEY: &str = "path";
 const MOD_DLL_SUBPATH: &str = "MCC/Binaries/Win64";
 const MOD_DLL_NAME: &str = "WTSAPI32.dll";
 const EXTRA_MOD_FILES: &[&str] = &["alpha_ring_menu.bin", "alpha_ring_menu.cfg"];
@@ -20,11 +22,6 @@ const WORKSHOP_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSHOP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const WORKSHOP_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-// steam_api64.dll is embedded in the exe and delay-loaded (see build.rs) so
-// a single portable exe works without an MSI placing the DLL alongside it.
-// Windows only resolves the delay-loaded import on the first real
-// Steamworks call, so we have until `ensure_workshop_items` runs to have
-// written our embedded copy out next to the exe.
 #[cfg(target_os = "windows")]
 static STEAM_API_DLL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/steam_api64.dll"));
 
@@ -80,18 +77,12 @@ fn emit_log(app: &AppHandle, message: impl Into<String>) {
 
 #[cfg(target_os = "windows")]
 fn steam_root_candidates() -> Vec<PathBuf> {
-    let mut roots = vec![
+    vec![
         PathBuf::from("C:/Program Files (x86)/Steam"),
         PathBuf::from("C:/Program Files/Steam"),
-    ];
-
-    for letter in b'D'..=b'Z' {
-        for name in ["Steam", "SteamLibrary"] {
-            roots.push(PathBuf::from(format!("{}:/{}", letter as char, name)));
-        }
-    }
-
-    roots
+        PathBuf::from("C:/Steam"),
+        PathBuf::from("C:/SteamLibrary"),
+    ]
 }
 
 #[cfg(target_os = "linux")]
@@ -100,8 +91,6 @@ fn steam_root_candidates() -> Vec<PathBuf> {
 
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        // Covers the native Debian/Flatpak/Steam Deck install layouts; whichever
-        // one is real is the one that actually has a steamapps directory in it.
         roots.push(home.join(".local/share/Steam"));
         roots.push(home.join(".steam/steam"));
         roots.push(home.join(".steam/root"));
@@ -111,8 +100,6 @@ fn steam_root_candidates() -> Vec<PathBuf> {
     roots
 }
 
-// Steam records every library folder the user has added (including ones on
-// other drives) in this VDF file next to the main Steam install's steamapps.
 fn parse_library_folders(vdf_path: &Path) -> Vec<PathBuf> {
     let Ok(contents) = fs::read_to_string(vdf_path) else {
         return Vec::new();
@@ -126,7 +113,65 @@ fn parse_library_folders(vdf_path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn find_game_path() -> Option<PathBuf> {
+#[cfg(target_os = "windows")]
+fn default_cfg_path_value() -> PathBuf {
+    PathBuf::from(
+        r"C:\Program Files (x86)\Steam\steamapps\common\Halo The Master Chief Collection",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn default_cfg_path_value() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".local/share/Steam/steamapps/common/Halo The Master Chief Collection")
+}
+
+fn cfg_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join(CFG_FILE_NAME))
+}
+
+fn ensure_cfg_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let path = cfg_file_path(app)?;
+
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        let contents = format!(
+            "{} = {}\n",
+            CFG_PATH_KEY,
+            default_cfg_path_value().display()
+        );
+        fs::write(&path, contents).map_err(|e| e.to_string())?;
+    }
+
+    Ok(path)
+}
+
+fn read_cfg_path(app: &AppHandle) -> Option<PathBuf> {
+    let path = ensure_cfg_file(app).ok()?;
+    let contents = fs::read_to_string(&path).ok()?;
+
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        if key.trim() != CFG_PATH_KEY {
+            return None;
+        }
+
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        }
+    })
+}
+
+fn find_game_path(app: &AppHandle) -> Option<PathBuf> {
     for steam_root in steam_root_candidates() {
         let steamapps = steam_root.join("steamapps");
         if !steamapps.is_dir() {
@@ -144,11 +189,9 @@ fn find_game_path() -> Option<PathBuf> {
         }
     }
 
-    None
+    read_cfg_path(app).filter(|path| path.is_dir())
 }
 
-// Workshop content for an app is downloaded into the same library folder the
-// app itself lives in, e.g. `<library>/steamapps/workshop/content/<app id>`.
 fn workshop_item_path(steamapps_dir: &Path, item_id: u64) -> PathBuf {
     steamapps_dir
         .join("workshop/content")
@@ -156,8 +199,6 @@ fn workshop_item_path(steamapps_dir: &Path, item_id: u64) -> PathBuf {
         .join(item_id.to_string())
 }
 
-// Any failure here means the mod's required Workshop content isn't on disk,
-// so we close the app instead of letting it continue into a broken launch.
 fn ensure_workshop_items(app: &AppHandle, steamapps_dir: &Path) -> Result<(), String> {
     let missing: Vec<u64> = WORKSHOP_ITEM_IDS
         .iter()
@@ -216,10 +257,6 @@ fn ensure_workshop_items(app: &AppHandle, steamapps_dir: &Path) -> Result<(), St
         ugc.download_item(PublishedFileId(*item_id), true);
     }
 
-    // The actual file transfer only happens while this process's Steam
-    // session is alive, so we have to keep pumping callbacks and stay
-    // connected until every item reports installed (or we time out) instead
-    // of letting `client`/`ugc` drop and shut the session down early.
     emit_log(app, "Downloading Workshop items...");
 
     let mut remaining: Vec<u64> = missing.clone();
@@ -244,9 +281,6 @@ fn ensure_workshop_items(app: &AppHandle, steamapps_dir: &Path) -> Result<(), St
             !installed
         });
 
-        // Track whether any item's downloaded byte count has moved; if
-        // nothing has progressed for a while, the download has stalled and
-        // we shouldn't keep waiting out the full timeout.
         let mut any_progress = false;
         for item_id in &remaining {
             if let Some((current, _total)) = ugc.item_download_info(PublishedFileId(*item_id)) {
@@ -297,9 +331,8 @@ fn check_os(app: &AppHandle) -> Result<(), String> {
 
     emit_log(app, "Checking MCC installation...");
 
-    let game_path = find_game_path().ok_or_else(|| {
-        "Couldn't find MCC".to_string()
-    })?;
+    let game_path = find_game_path(app)
+        .ok_or_else(|| "Please specify game location in config file.".to_string())?;
 
     emit_log(app, format!("Found game installation at {}", game_path.display()));
 
@@ -452,10 +485,6 @@ async fn check_mod(app: &AppHandle, vanilla_mode: bool) -> Result<(), String> {
     launch(app, vanilla_mode)
 }
 
-// `steam` is only resolvable via PATH on Linux; on Windows the Steam
-// installer doesn't add itself to PATH, so `Command::new("steam")` fails
-// with a "program not found" error. Resolve the real steam.exe path using
-// the same install-directory scan `find_game_path` relies on.
 #[cfg(target_os = "windows")]
 fn steam_command() -> Result<Command, String> {
     steam_root_candidates()
@@ -527,6 +556,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
+            if let Err(err) = ensure_cfg_file(&app.handle().clone()) {
+                eprintln!("Failed to create config file: {err}");
+            }
+
             let fullscreen = std::env::args().any(|arg| arg == "-fullscreen");
 
             if fullscreen {

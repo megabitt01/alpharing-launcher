@@ -4,6 +4,6 @@ import App from "./App";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <App buildInfo={"build v1.0.0"}/>
+    <App buildInfo={"build v1.0.1"}/>
   </React.StrictMode>,
 );
