@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use steamworks::PublishedFileId;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
 
 const GAME_SUBPATH: &str = "steamapps/common/Halo The Master Chief Collection";
 const CFG_FILE_NAME: &str = "launcher.cfg";
@@ -128,21 +129,45 @@ fn default_cfg_path_value() -> PathBuf {
     home.join(".local/share/Steam/steamapps/common/Halo The Master Chief Collection")
 }
 
-fn cfg_file_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join(CFG_FILE_NAME))
+// On Linux, an AppImage runs from a temporary squashfs mount, so
+// `current_exe` doesn't point next to the actual .AppImage file — but the
+// AppImage runtime sets `APPIMAGE` to that file's real location.
+#[cfg(target_os = "linux")]
+fn cfg_dir() -> Result<PathBuf, String> {
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        if let Some(parent) = PathBuf::from(appimage).parent() {
+            return Ok(parent.to_path_buf());
+        }
+    }
+
+    std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "Could not determine executable directory".to_string())
 }
 
-fn ensure_cfg_file(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = cfg_file_path(app)?;
+#[cfg(target_os = "windows")]
+fn cfg_dir() -> Result<PathBuf, String> {
+    std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "Could not determine executable directory".to_string())
+}
+
+fn cfg_file_path() -> Result<PathBuf, String> {
+    Ok(cfg_dir()?.join(CFG_FILE_NAME))
+}
+
+// Writes the cfg file with its default value the first time the launcher
+// runs. Left untouched afterwards so a user's custom path sticks around.
+fn ensure_cfg_file() -> Result<PathBuf, String> {
+    let path = cfg_file_path()?;
 
     if !path.exists() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-
         let contents = format!(
-            "{} = {}\n",
+            "{} = \"{}\"\n",
             CFG_PATH_KEY,
             default_cfg_path_value().display()
         );
@@ -152,8 +177,8 @@ fn ensure_cfg_file(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn read_cfg_path(app: &AppHandle) -> Option<PathBuf> {
-    let path = ensure_cfg_file(app).ok()?;
+fn read_cfg_path() -> Option<PathBuf> {
+    let path = ensure_cfg_file().ok()?;
     let contents = fs::read_to_string(&path).ok()?;
 
     contents.lines().find_map(|line| {
@@ -163,6 +188,11 @@ fn read_cfg_path(app: &AppHandle) -> Option<PathBuf> {
         }
 
         let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+
         if value.is_empty() {
             None
         } else {
@@ -171,7 +201,7 @@ fn read_cfg_path(app: &AppHandle) -> Option<PathBuf> {
     })
 }
 
-fn find_game_path(app: &AppHandle) -> Option<PathBuf> {
+fn find_game_path() -> Option<PathBuf> {
     for steam_root in steam_root_candidates() {
         let steamapps = steam_root.join("steamapps");
         if !steamapps.is_dir() {
@@ -189,7 +219,7 @@ fn find_game_path(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
-    read_cfg_path(app).filter(|path| path.is_dir())
+    read_cfg_path().filter(|path| path.is_dir())
 }
 
 fn workshop_item_path(steamapps_dir: &Path, item_id: u64) -> PathBuf {
@@ -331,7 +361,7 @@ fn check_os(app: &AppHandle) -> Result<(), String> {
 
     emit_log(app, "Checking MCC installation...");
 
-    let game_path = find_game_path(app)
+    let game_path = find_game_path()
         .ok_or_else(|| "Please specify game location in config file.".to_string())?;
 
     emit_log(app, format!("Found game installation at {}", game_path.display()));
@@ -549,6 +579,18 @@ async fn play(app: AppHandle, vanilla_mode: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_install_dir(app: AppHandle) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "Couldn't determine install directory".to_string())?;
+
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -556,7 +598,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            if let Err(err) = ensure_cfg_file(&app.handle().clone()) {
+            if let Err(err) = ensure_cfg_file() {
                 eprintln!("Failed to create config file: {err}");
             }
 
@@ -570,7 +612,7 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![play, latest_mod_version])
+        .invoke_handler(tauri::generate_handler![play, latest_mod_version, open_install_dir])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

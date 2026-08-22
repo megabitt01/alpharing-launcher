@@ -27,9 +27,19 @@ const launchModded = async () => {
   closeWindowDelayed();
 }
 
+const openInstallDir = async () => {
+  await invoke("open_install_dir");
+}
+
 const MENU_BUTTONS = [
   { label: "Play MCC with Anti-Cheat", action: () => launchVanilla() },
   { label: "Play Splitscreen Halo", action: () => launchModded() },
+  {
+    label: "Open Launcher Folder",
+    startMessage: "Opening Folder...",
+    action: () => openInstallDir(),
+    returnToMenu: true,
+  },
   {
     label: "Quit to Desktop",
     startMessage: "Shutting Down...",
@@ -91,11 +101,17 @@ function App({buildInfo = "", modInfo: initialModInfo = ""}) {
     setLog(MENU_BUTTONS[index].startMessage ?? "");
     setShowLog(true);
 
-    Promise.resolve(MENU_BUTTONS[index].action()).catch((err) => {
-      console.error("Error: ", err);
-      setLog(`Error: ${err}`);
-      errorRevertTimeoutRef.current = setTimeout(() => setShowLog(false), ERROR_DISPLAY_MS);
-    });
+    Promise.resolve(MENU_BUTTONS[index].action())
+      .then(() => {
+        if (MENU_BUTTONS[index].returnToMenu) {
+          setShowLog(false);
+        }
+      })
+      .catch((err) => {
+        console.error("Error: ", err);
+        setLog(`Error: ${err}`);
+        errorRevertTimeoutRef.current = setTimeout(() => setShowLog(false), ERROR_DISPLAY_MS);
+      });
   };
 
   const activateSelection = () => {
